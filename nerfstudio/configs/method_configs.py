@@ -290,11 +290,11 @@ method_configs["vanilla-nerf"] = TrainerConfig(
     ),
     optimizers={
         "fields": {
-            "optimizer": RAdamOptimizerConfig(lr=5e-4, eps=1e-08),
+            "optimizer": AdamOptimizerConfig(lr=5e-4, eps=1e-08),
             "scheduler": None,
         },
         "temporal_distortion": {
-            "optimizer": RAdamOptimizerConfig(lr=5e-4, eps=1e-08),
+            "optimizer": AdamOptimizerConfig(lr=5e-4, eps=1e-08),
             "scheduler": None,
         },
     },
