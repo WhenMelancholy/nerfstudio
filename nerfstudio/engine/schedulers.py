@@ -140,3 +140,26 @@ class CosineDecayScheduler(Scheduler):
 
         scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=func)
         return scheduler
+
+@dataclass
+class TFExponentialDecaySchedulerConfig(SchedulerConfig):
+    """Config for Tensorflow-style exponential decay scheduler"""
+
+    _target:Type=field(default_factory=lambda:TFExponentialDecayScheduler)
+    """target class to instantiate"""
+    decay_steps:int=500*1000
+    decay_rate:float=0.1
+    """current_learning_rate=initial_learning_rate * decay_rate ^ (step / decay_steps)"""
+
+class TFExponentialDecayScheduler(Scheduler):
+    """Tensorflow style exponential scheduler. 
+    See documentation of tf.keras.optimizers.schedules.ExponentialDecay for details."""
+
+    config: TFExponentialDecaySchedulerConfig
+
+    def get_scheduler(self,optimizer:Optimizer,
+                      lr_init:float)->lr_scheduler._LRScheduler:
+        def func(step):
+            return np.pow(self.config.decay_rate,step/self.config.decay_steps)
+        scheduler=lr_scheduler.LambdaLR(optimizer,lr_lambda=func)
+        return scheduler

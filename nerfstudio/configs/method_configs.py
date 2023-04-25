@@ -45,6 +45,7 @@ from nerfstudio.engine.optimizers import AdamOptimizerConfig, RAdamOptimizerConf
 from nerfstudio.engine.schedulers import (
     CosineDecaySchedulerConfig,
     ExponentialDecaySchedulerConfig,
+    TFExponentialDecaySchedulerConfig,
 )
 from nerfstudio.engine.trainer import TrainerConfig
 from nerfstudio.field_components.temporal_distortions import TemporalDistortionKind
@@ -291,11 +292,11 @@ method_configs["vanilla-nerf"] = TrainerConfig(
     optimizers={
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=5e-4, eps=1e-08),
-            "scheduler": None,
+            "scheduler": TFExponentialDecaySchedulerConfig(),
         },
         "temporal_distortion": {
             "optimizer": AdamOptimizerConfig(lr=5e-4, eps=1e-08),
-            "scheduler": None,
+            "scheduler": TFExponentialDecaySchedulerConfig(),
         },
     },
 )
