@@ -52,8 +52,7 @@ if [ -z "${GPU_IDX[0]+x}" ]; then
 fi
 echo "available gpus... ${GPU_IDX[*]}"
 
-# DATASETS=("mic" "ficus" "chair" "hotdog") # Adam test
-DATASETS=("materials" "drums" "ship" "lego" "hotdog") # num_freq
+DATASETS=("mic" "ficus" "chair" "materials" "drums" "ship" "lego" "hotdog") 
 date
 tag=$(date +'%Y-%m-%d')
 idx=0
