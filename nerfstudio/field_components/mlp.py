@@ -15,7 +15,7 @@
 """
 Multi Layer Perceptron
 """
-from typing import Optional, Set, Tuple
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -40,17 +40,23 @@ class MLP(FieldComponent):
         self,
         in_dim: int,
         num_layers: int,
-        layer_width: int,
+        layer_width: Union[int, Tuple[int]],
         out_dim: Optional[int] = None,
         skip_connections: Optional[Tuple[int]] = None,
         activation: Optional[nn.Module] = nn.ReLU(),
         out_activation: Optional[nn.Module] = None,
     ) -> None:
-
         super().__init__()
         self.in_dim = in_dim
         assert self.in_dim > 0
-        self.out_dim = out_dim if out_dim is not None else layer_width
+        if isinstance(layer_width, int):
+            self.out_dim = out_dim if out_dim is not None else layer_width
+        else:
+            if out_dim is None:
+                out_dim = layer_width[-1]
+                layer_width = layer_width[:-1]
+                num_layers -= 1
+            self.out_dim = out_dim
         self.num_layers = num_layers
         self.layer_width = layer_width
         self.skip_connections = skip_connections
@@ -63,18 +69,34 @@ class MLP(FieldComponent):
     def build_nn_modules(self) -> None:
         """Initialize multi-layer perceptron."""
         layers = []
-        if self.num_layers == 1:
-            layers.append(nn.Linear(self.in_dim, self.out_dim))
+        if isinstance(self.layer_width, int):
+            if self.num_layers == 1:
+                layers.append(nn.Linear(self.in_dim, self.out_dim))
+            else:
+                for i in range(self.num_layers - 1):
+                    if i == 0:
+                        assert i not in self._skip_connections, "Skip connection at layer 0 doesn't make sense."
+                        layers.append(nn.Linear(self.in_dim, self.layer_width))
+                    elif i in self._skip_connections:
+                        layers.append(nn.Linear(self.layer_width + self.in_dim, self.layer_width))
+                    else:
+                        layers.append(nn.Linear(self.layer_width, self.layer_width))
+                layers.append(nn.Linear(self.layer_width, self.out_dim))
         else:
-            for i in range(self.num_layers - 1):
-                if i == 0:
-                    assert i not in self._skip_connections, "Skip connection at layer 0 doesn't make sense."
-                    layers.append(nn.Linear(self.in_dim, self.layer_width))
-                elif i in self._skip_connections:
-                    layers.append(nn.Linear(self.layer_width + self.in_dim, self.layer_width))
-                else:
-                    layers.append(nn.Linear(self.layer_width, self.layer_width))
-            layers.append(nn.Linear(self.layer_width, self.out_dim))
+            assert len(self.layer_width) == self.num_layers, "Length of layer_width does not match number of layers"
+            if self.num_layers == 0:
+                layers.append(nn.Linear(self.in_dim, self.out_dim))
+            else:
+                layers.append(nn.Linear(self.in_dim, self.layer_width[0]))
+                for i in range(self.num_layers - 1):
+                    layers.append(
+                        nn.Linear(
+                            self.layer_width[i] + (self.in_dim if i + 1 in self._skip_connections else 0),
+                            self.layer_width[i + 1],
+                        )
+                    )
+                layers.append(nn.Linear(self.layer_width[-1], self.out_dim))
+
         self.layers = nn.ModuleList(layers)
 
     def forward(self, in_tensor: TensorType["bs":..., "in_dim"]) -> TensorType["bs":..., "out_dim"]:

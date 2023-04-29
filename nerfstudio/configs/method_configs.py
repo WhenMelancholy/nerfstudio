@@ -286,17 +286,18 @@ method_configs["vanilla-nerf"] = TrainerConfig(
     pipeline=VanillaPipelineConfig(
         datamanager=VanillaDataManagerConfig(
             dataparser=BlenderDataParserConfig(),
+            train_num_rays_per_batch=4096,
         ),
         model=VanillaModelConfig(_target=NeRFModel),
     ),
     optimizers={
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=5e-4, eps=1e-07),
-            "scheduler": None,
+            "scheduler": TFExponentialDecaySchedulerConfig(),
         },
         "temporal_distortion": {
             "optimizer": AdamOptimizerConfig(lr=5e-4, eps=1e-07),
-            "scheduler": None,
+            "scheduler": TFExponentialDecaySchedulerConfig(),
         },
     },
 )
