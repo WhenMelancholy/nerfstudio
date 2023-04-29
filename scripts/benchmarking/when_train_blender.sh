@@ -52,7 +52,7 @@ if [ -z "${GPU_IDX[0]+x}" ]; then
 fi
 echo "available gpus... ${GPU_IDX[*]}"
 
-DATASETS=("mic" "ficus" "chair" "materials" "drums" "ship" "lego" "hotdog") 
+DATASETS=("mic" "ficus") 
 date
 tag=$(date +'%Y-%m-%d')
 idx=0
@@ -81,7 +81,7 @@ for dataset in "${DATASETS[@]}"; do
              --experiment-name="blender_${dataset}_${tag}" \
              --relative-model-dir=nerfstudio_models/ \
              --steps-per-save=1000 \
-             --max-num-iterations=26000 \
+             --max-num-iterations=10000 \
              --logging.local-writer.enable=False  \
              --logging.enable-profiler=False \
              --vis "${vis}" \
