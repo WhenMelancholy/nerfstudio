@@ -45,6 +45,7 @@ class MLP(FieldComponent):
         skip_connections: Optional[Tuple[int]] = None,
         activation: Optional[nn.Module] = nn.ReLU(),
         out_activation: Optional[nn.Module] = None,
+        init_weight:bool=False,
     ) -> None:
         super().__init__()
         self.in_dim = in_dim
@@ -65,6 +66,18 @@ class MLP(FieldComponent):
         self.out_activation = out_activation
         self.net = None
         self.build_nn_modules()
+        if init_weight:
+            self._initialize_weights()
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out", nonlinearity="relu")
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                nn.init.constant_(m.bias, 0)
 
     def build_nn_modules(self) -> None:
         """Initialize multi-layer perceptron."""

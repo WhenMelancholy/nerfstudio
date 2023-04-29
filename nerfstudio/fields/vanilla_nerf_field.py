@@ -74,6 +74,7 @@ class NeRFField(Field):
             layer_width=base_mlp_layer_width,
             skip_connections=skip_connections,
             out_activation=nn.ReLU(),
+            init_weight=True,
         )
 
         self.mlp_head = MLP(
@@ -81,9 +82,10 @@ class NeRFField(Field):
             num_layers=head_mlp_num_layers,
             layer_width=head_mlp_layer_width,
             out_activation=nn.ReLU(),
+            init_weight=True,
         )
 
-        self.field_output_density = DensityFieldHead(in_dim=self.mlp_base.get_out_dim(), activation=nn.ReLU())
+        self.field_output_density = DensityFieldHead(in_dim=self.mlp_base.get_out_dim())
         self.field_heads = nn.ModuleList(field_heads)
         for field_head in self.field_heads:
             field_head.set_in_dim(self.mlp_head.get_out_dim())  # type: ignore
