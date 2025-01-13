@@ -25,8 +25,6 @@ from jaxtyping import Float
 from numpy.typing import NDArray
 from torch import Tensor
 
-from nerfstudio.utils.misc import torch_compile
-
 _EPS = np.finfo(float).eps * 4.0
 
 
@@ -56,7 +54,7 @@ def quaternion_from_matrix(matrix: NDArray, isprecise: bool = False) -> np.ndarr
         matrix: rotation matrix to obtain quaternion
         isprecise: if True, input matrix is assumed to be precise rotation matrix and a faster algorithm is used.
     """
-    M = np.array(matrix, dtype=np.float64, copy=False)[:4, :4]
+    M = np.array(matrix, dtype=np.float64, copy=True)[:4, :4]
     if isprecise:
         q = np.empty((4,))
         t = np.trace(M)
@@ -208,19 +206,40 @@ def get_interpolated_k(
     return Ks
 
 
-def get_ordered_poses_and_k(
+def get_interpolated_time(
+    time_a: Float[Tensor, "1"], time_b: Float[Tensor, "1"], steps: int = 10
+) -> List[Float[Tensor, "1"]]:
+    """
+    Returns interpolated time between two camera poses with specified number of steps.
+
+    Args:
+        time_a: camera time 1
+        time_b: camera time 2
+        steps: number of steps the interpolated pose path should contain
+    """
+    times: List[Float[Tensor, "1"]] = []
+    ts = np.linspace(0, 1, steps)
+    for t in ts:
+        new_t = time_a * (1.0 - t) + time_b * t
+        times.append(new_t)
+    return times
+
+
+def get_ordered_poses_and_k_and_time(
     poses: Float[Tensor, "num_poses 3 4"],
     Ks: Float[Tensor, "num_poses 3 3"],
-) -> Tuple[Float[Tensor, "num_poses 3 4"], Float[Tensor, "num_poses 3 3"]]:
+    times: Optional[Float[Tensor, "num_poses 1"]] = None,
+) -> Tuple[Float[Tensor, "num_poses 3 4"], Float[Tensor, "num_poses 3 3"], Optional[Float[Tensor, "num_poses 1"]]]:
     """
     Returns ordered poses and intrinsics by euclidian distance between poses.
 
     Args:
         poses: list of camera poses
         Ks: list of camera intrinsics
+        times: list of camera times
 
     Returns:
-        tuple of ordered poses and intrinsics
+        tuple of ordered poses, intrinsics and times
 
     """
 
@@ -228,28 +247,33 @@ def get_ordered_poses_and_k(
 
     ordered_poses = torch.unsqueeze(poses[0], 0)
     ordered_ks = torch.unsqueeze(Ks[0], 0)
+    ordered_times = torch.unsqueeze(times[0], 0) if times is not None else None
 
     # remove the first pose from poses
     poses = poses[1:]
     Ks = Ks[1:]
+    times = times[1:] if times is not None else None
 
     for _ in range(poses_num - 1):
         distances = torch.norm(ordered_poses[-1][:, 3] - poses[:, :, 3], dim=1)
         idx = torch.argmin(distances)
         ordered_poses = torch.cat((ordered_poses, torch.unsqueeze(poses[idx], 0)), dim=0)
         ordered_ks = torch.cat((ordered_ks, torch.unsqueeze(Ks[idx], 0)), dim=0)
+        ordered_times = torch.cat((ordered_times, torch.unsqueeze(times[idx], 0)), dim=0) if times is not None else None  # type: ignore
         poses = torch.cat((poses[0:idx], poses[idx + 1 :]), dim=0)
         Ks = torch.cat((Ks[0:idx], Ks[idx + 1 :]), dim=0)
+        times = torch.cat((times[0:idx], times[idx + 1 :]), dim=0) if times is not None else None
 
-    return ordered_poses, ordered_ks
+    return ordered_poses, ordered_ks, ordered_times
 
 
 def get_interpolated_poses_many(
     poses: Float[Tensor, "num_poses 3 4"],
     Ks: Float[Tensor, "num_poses 3 3"],
+    times: Optional[Float[Tensor, "num_poses 1"]] = None,
     steps_per_transition: int = 10,
     order_poses: bool = False,
-) -> Tuple[Float[Tensor, "num_poses 3 4"], Float[Tensor, "num_poses 3 3"]]:
+) -> Tuple[Float[Tensor, "num_poses 3 4"], Float[Tensor, "num_poses 3 3"], Optional[Float[Tensor, "num_poses 1"]]]:
     """Return interpolated poses for many camera poses.
 
     Args:
@@ -263,21 +287,27 @@ def get_interpolated_poses_many(
     """
     traj = []
     k_interp = []
+    time_interp = [] if times is not None else None
 
     if order_poses:
-        poses, Ks = get_ordered_poses_and_k(poses, Ks)
+        poses, Ks, times = get_ordered_poses_and_k_and_time(poses, Ks, times)
 
     for idx in range(poses.shape[0] - 1):
         pose_a = poses[idx].cpu().numpy()
         pose_b = poses[idx + 1].cpu().numpy()
-        poses_ab = get_interpolated_poses(pose_a, pose_b, steps=steps_per_transition)
-        traj += poses_ab
+        traj += get_interpolated_poses(pose_a, pose_b, steps=steps_per_transition)
         k_interp += get_interpolated_k(Ks[idx], Ks[idx + 1], steps=steps_per_transition)
+        if times is not None:
+            time_interp += get_interpolated_time(times[idx], times[idx + 1], steps=steps_per_transition)  # type: ignore
 
     traj = np.stack(traj, axis=0)
     k_interp = torch.stack(k_interp, dim=0)
-
-    return torch.tensor(traj, dtype=torch.float32), torch.tensor(k_interp, dtype=torch.float32)
+    time_interp = torch.stack(time_interp, dim=0) if time_interp is not None else None
+    return (
+        torch.tensor(traj, dtype=torch.float32),
+        torch.tensor(k_interp, dtype=torch.float32),
+        torch.tensor(time_interp, dtype=torch.float32) if time_interp is not None else None,
+    )
 
 
 def normalize(x: torch.Tensor) -> Float[Tensor, "*batch"]:
@@ -348,7 +378,7 @@ def _compute_residual_and_jacobian(
     xd: torch.Tensor,
     yd: torch.Tensor,
     distortion_params: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,]:
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Auxiliary function of radial_and_tangential_undistort() that computes residuals and jacobians.
     Adapted from MultiNeRF:
     https://github.com/google-research/multinerf/blob/b02228160d3179300c7d499dca28cb9ca3677f32/internal/camera_utils.py#L427-L474
@@ -407,7 +437,7 @@ def _compute_residual_and_jacobian(
     return fx, fy, fx_x, fx_y, fy_x, fy_y
 
 
-@torch_compile(dynamic=True, mode="reduce-overhead", backend="eager")
+# @torch_compile(dynamic=True, mode="reduce-overhead", backend="eager")
 def radial_and_tangential_undistort(
     coords: torch.Tensor,
     distortion_params: torch.Tensor,
@@ -448,7 +478,7 @@ def radial_and_tangential_undistort(
     return torch.stack([x, y], dim=-1)
 
 
-def rotation_matrix(a: Float[Tensor, "3"], b: Float[Tensor, "3"]) -> Float[Tensor, "3 3"]:
+def rotation_matrix_between(a: Float[Tensor, "3"], b: Float[Tensor, "3"]) -> Float[Tensor, "3 3"]:
     """Compute the rotation matrix that rotates vector a to vector b.
 
     Args:
@@ -459,13 +489,15 @@ def rotation_matrix(a: Float[Tensor, "3"], b: Float[Tensor, "3"]) -> Float[Tenso
     """
     a = a / torch.linalg.norm(a)
     b = b / torch.linalg.norm(b)
-    v = torch.cross(a, b)
-    c = torch.dot(a, b)
-    # If vectors are exactly opposite, we add a little noise to one of them
-    if c < -1 + 1e-8:
-        eps = (torch.rand(3) - 0.5) * 0.01
-        return rotation_matrix(a + eps, b)
-    s = torch.linalg.norm(v)
+    v = torch.linalg.cross(a, b)  # Axis of rotation.
+
+    # Handle cases where `a` and `b` are parallel.
+    eps = 1e-6
+    if torch.sum(torch.abs(v)) < eps:
+        x = torch.tensor([1.0, 0, 0]) if abs(a[0]) < eps else torch.tensor([0, 1.0, 0])
+        v = torch.linalg.cross(a, x)
+
+    v = v / torch.linalg.norm(v)
     skew_sym_mat = torch.Tensor(
         [
             [0, -v[2], v[1]],
@@ -473,7 +505,10 @@ def rotation_matrix(a: Float[Tensor, "3"], b: Float[Tensor, "3"]) -> Float[Tenso
             [-v[1], v[0], 0],
         ]
     )
-    return torch.eye(3) + skew_sym_mat + skew_sym_mat @ skew_sym_mat * ((1 - c) / (s**2 + 1e-8))
+    theta = torch.acos(torch.clip(torch.dot(a, b), -1, 1))
+
+    # Rodrigues rotation formula. https://en.wikipedia.org/wiki/Rodrigues%27_rotation_formula
+    return torch.eye(3) + torch.sin(theta) * skew_sym_mat + (1 - torch.cos(theta)) * (skew_sym_mat @ skew_sym_mat)
 
 
 def focus_of_attention(poses: Float[Tensor, "*num_poses 4 4"], initial_focus: Float[Tensor, "3"]) -> Float[Tensor, "3"]:
@@ -574,7 +609,8 @@ def auto_orient_and_center_poses(
         oriented_poses = transform @ poses
 
         if oriented_poses.mean(dim=0)[2, 1] < 0:
-            oriented_poses[:, 1:3] = -1 * oriented_poses[:, 1:3]
+            oriented_poses[1:3, :] = -1 * oriented_poses[1:3, :]
+            transform[1:3, :] = -1 * transform[1:3, :]
     elif method in ("up", "vertical"):
         up = torch.mean(poses[:, :3, 1], dim=0)
         up = up / torch.linalg.norm(up)
@@ -611,7 +647,7 @@ def auto_orient_and_center_poses(
                 # re-normalize
                 up = up / torch.linalg.norm(up)
 
-        rotation = rotation_matrix(up, torch.Tensor([0, 0, 1]))
+        rotation = rotation_matrix_between(up, torch.Tensor([0, 0, 1]))
         transform = torch.cat([rotation, rotation @ -translation[..., None]], dim=-1)
         oriented_poses = transform @ poses
     elif method == "none":
@@ -623,3 +659,224 @@ def auto_orient_and_center_poses(
         raise ValueError(f"Unknown value for method: {method}")
 
     return oriented_poses, transform
+
+
+@torch.jit.script
+def fisheye624_project(xyz, params):
+    """
+    Batched implementation of the FisheyeRadTanThinPrism (aka Fisheye624) camera
+    model project() function.
+    Inputs:
+        xyz: BxNx3 tensor of 3D points to be projected
+        params: Bx16 tensor of Fisheye624 parameters formatted like this:
+                [f_u f_v c_u c_v {k_0 ... k_5} {p_0 p_1} {s_0 s_1 s_2 s_3}]
+                or Bx15 tensor of Fisheye624 parameters formatted like this:
+                [f c_u c_v {k_0 ... k_5} {p_0 p_1} {s_0 s_1 s_2 s_3}]
+    Outputs:
+        uv: BxNx2 tensor of 2D projections of xyz in image plane
+    Model for fisheye cameras with radial, tangential, and thin-prism distortion.
+    This model allows fu != fv.
+    Specifically, the model is:
+    uvDistorted = [x_r]  + tangentialDistortion  + thinPrismDistortion
+                  [y_r]
+    proj = diag(fu,fv) * uvDistorted + [cu;cv];
+    where:
+      a = x/z, b = y/z, r = (a^2+b^2)^(1/2)
+      th = atan(r)
+      cosPhi = a/r, sinPhi = b/r
+      [x_r]  = (th+ k0 * th^3 + k1* th^5 + ...) [cosPhi]
+      [y_r]                                     [sinPhi]
+      the number of terms in the series is determined by the template parameter numK.
+      tangentialDistortion = [(2 x_r^2 + rd^2)*p_0 + 2*x_r*y_r*p_1]
+                             [(2 y_r^2 + rd^2)*p_1 + 2*x_r*y_r*p_0]
+      where rd^2 = x_r^2 + y_r^2
+      thinPrismDistortion = [s0 * rd^2 + s1 rd^4]
+                            [s2 * rd^2 + s3 rd^4]
+    Author: Daniel DeTone (ddetone@meta.com)
+    """
+
+    assert xyz.ndim == 3
+    assert params.ndim == 2
+    assert params.shape[-1] == 16 or params.shape[-1] == 15, "This model allows fx != fy"
+    eps = 1e-9
+    B, N = xyz.shape[0], xyz.shape[1]
+
+    # Radial correction.
+    z = xyz[:, :, 2].reshape(B, N, 1)
+    z = torch.where(torch.abs(z) < eps, eps * torch.sign(z), z)
+    ab = xyz[:, :, :2] / z
+    r = torch.norm(ab, dim=-1, p=2, keepdim=True)
+    th = torch.atan(r)
+    th_divr = torch.where(r < eps, torch.ones_like(ab), ab / r)
+    th_k = th.reshape(B, N, 1).clone()
+    for i in range(6):
+        th_k = th_k + params[:, -12 + i].reshape(B, 1, 1) * torch.pow(th, 3 + i * 2)
+    xr_yr = th_k * th_divr
+    uv_dist = xr_yr
+
+    # Tangential correction.
+    p0 = params[:, -6].reshape(B, 1)
+    p1 = params[:, -5].reshape(B, 1)
+    xr = xr_yr[:, :, 0].reshape(B, N)
+    yr = xr_yr[:, :, 1].reshape(B, N)
+    xr_yr_sq = torch.square(xr_yr)
+    xr_sq = xr_yr_sq[:, :, 0].reshape(B, N)
+    yr_sq = xr_yr_sq[:, :, 1].reshape(B, N)
+    rd_sq = xr_sq + yr_sq
+    uv_dist_tu = uv_dist[:, :, 0] + ((2.0 * xr_sq + rd_sq) * p0 + 2.0 * xr * yr * p1)
+    uv_dist_tv = uv_dist[:, :, 1] + ((2.0 * yr_sq + rd_sq) * p1 + 2.0 * xr * yr * p0)
+    uv_dist = torch.stack([uv_dist_tu, uv_dist_tv], dim=-1)  # Avoids in-place complaint.
+
+    # Thin Prism correction.
+    s0 = params[:, -4].reshape(B, 1)
+    s1 = params[:, -3].reshape(B, 1)
+    s2 = params[:, -2].reshape(B, 1)
+    s3 = params[:, -1].reshape(B, 1)
+    rd_4 = torch.square(rd_sq)
+    uv_dist[:, :, 0] = uv_dist[:, :, 0] + (s0 * rd_sq + s1 * rd_4)
+    uv_dist[:, :, 1] = uv_dist[:, :, 1] + (s2 * rd_sq + s3 * rd_4)
+
+    # Finally, apply standard terms: focal length and camera centers.
+    if params.shape[-1] == 15:
+        fx_fy = params[:, 0].reshape(B, 1, 1)
+        cx_cy = params[:, 1:3].reshape(B, 1, 2)
+    else:
+        fx_fy = params[:, 0:2].reshape(B, 1, 2)
+        cx_cy = params[:, 2:4].reshape(B, 1, 2)
+    result = uv_dist * fx_fy + cx_cy
+
+    return result
+
+
+# Core implementation of fisheye 624 unprojection. More details are documented here:
+# https://facebookresearch.github.io/projectaria_tools/docs/tech_insights/camera_intrinsic_models#the-fisheye62-model
+@torch.jit.script
+def fisheye624_unproject_helper(uv, params, max_iters: int = 5):
+    """
+    Batched implementation of the FisheyeRadTanThinPrism (aka Fisheye624) camera
+    model. There is no analytical solution for the inverse of the project()
+    function so this solves an optimization problem using Newton's method to get
+    the inverse.
+    Inputs:
+        uv: BxNx2 tensor of 2D pixels to be unprojected
+        params: Bx16 tensor of Fisheye624 parameters formatted like this:
+                [f_u f_v c_u c_v {k_0 ... k_5} {p_0 p_1} {s_0 s_1 s_2 s_3}]
+                or Bx15 tensor of Fisheye624 parameters formatted like this:
+                [f c_u c_v {k_0 ... k_5} {p_0 p_1} {s_0 s_1 s_2 s_3}]
+    Outputs:
+        xyz: BxNx3 tensor of 3D rays of uv points with z = 1.
+    Model for fisheye cameras with radial, tangential, and thin-prism distortion.
+    This model assumes fu=fv. This unproject function holds that:
+    X = unproject(project(X))     [for X=(x,y,z) in R^3, z>0]
+    and
+    x = project(unproject(s*x))   [for s!=0 and x=(u,v) in R^2]
+    Author: Daniel DeTone (ddetone@meta.com)
+    """
+
+    assert uv.ndim == 3, "Expected batched input shaped BxNx3"
+    assert params.ndim == 2
+    assert params.shape[-1] == 16 or params.shape[-1] == 15, "This model allows fx != fy"
+    eps = 1e-6
+    B, N = uv.shape[0], uv.shape[1]
+
+    if params.shape[-1] == 15:
+        fx_fy = params[:, 0].reshape(B, 1, 1)
+        cx_cy = params[:, 1:3].reshape(B, 1, 2)
+    else:
+        fx_fy = params[:, 0:2].reshape(B, 1, 2)
+        cx_cy = params[:, 2:4].reshape(B, 1, 2)
+
+    uv_dist = (uv - cx_cy) / fx_fy
+
+    # Compute xr_yr using Newton's method.
+    xr_yr = uv_dist.clone()  # Initial guess.
+    for _ in range(max_iters):
+        uv_dist_est = xr_yr.clone()
+        # Tangential terms.
+        p0 = params[:, -6].reshape(B, 1)
+        p1 = params[:, -5].reshape(B, 1)
+        xr = xr_yr[:, :, 0].reshape(B, N)
+        yr = xr_yr[:, :, 1].reshape(B, N)
+        xr_yr_sq = torch.square(xr_yr)
+        xr_sq = xr_yr_sq[:, :, 0].reshape(B, N)
+        yr_sq = xr_yr_sq[:, :, 1].reshape(B, N)
+        rd_sq = xr_sq + yr_sq
+        uv_dist_est[:, :, 0] = uv_dist_est[:, :, 0] + ((2.0 * xr_sq + rd_sq) * p0 + 2.0 * xr * yr * p1)
+        uv_dist_est[:, :, 1] = uv_dist_est[:, :, 1] + ((2.0 * yr_sq + rd_sq) * p1 + 2.0 * xr * yr * p0)
+        # Thin Prism terms.
+        s0 = params[:, -4].reshape(B, 1)
+        s1 = params[:, -3].reshape(B, 1)
+        s2 = params[:, -2].reshape(B, 1)
+        s3 = params[:, -1].reshape(B, 1)
+        rd_4 = torch.square(rd_sq)
+        uv_dist_est[:, :, 0] = uv_dist_est[:, :, 0] + (s0 * rd_sq + s1 * rd_4)
+        uv_dist_est[:, :, 1] = uv_dist_est[:, :, 1] + (s2 * rd_sq + s3 * rd_4)
+        # Compute the derivative of uv_dist w.r.t. xr_yr.
+        duv_dist_dxr_yr = uv.new_ones(B, N, 2, 2)
+        duv_dist_dxr_yr[:, :, 0, 0] = 1.0 + 6.0 * xr_yr[:, :, 0] * p0 + 2.0 * xr_yr[:, :, 1] * p1
+        offdiag = 2.0 * (xr_yr[:, :, 0] * p1 + xr_yr[:, :, 1] * p0)
+        duv_dist_dxr_yr[:, :, 0, 1] = offdiag
+        duv_dist_dxr_yr[:, :, 1, 0] = offdiag
+        duv_dist_dxr_yr[:, :, 1, 1] = 1.0 + 6.0 * xr_yr[:, :, 1] * p1 + 2.0 * xr_yr[:, :, 0] * p0
+        xr_yr_sq_norm = xr_yr_sq[:, :, 0] + xr_yr_sq[:, :, 1]
+        temp1 = 2.0 * (s0 + 2.0 * s1 * xr_yr_sq_norm)
+        duv_dist_dxr_yr[:, :, 0, 0] = duv_dist_dxr_yr[:, :, 0, 0] + (xr_yr[:, :, 0] * temp1)
+        duv_dist_dxr_yr[:, :, 0, 1] = duv_dist_dxr_yr[:, :, 0, 1] + (xr_yr[:, :, 1] * temp1)
+        temp2 = 2.0 * (s2 + 2.0 * s3 * xr_yr_sq_norm)
+        duv_dist_dxr_yr[:, :, 1, 0] = duv_dist_dxr_yr[:, :, 1, 0] + (xr_yr[:, :, 0] * temp2)
+        duv_dist_dxr_yr[:, :, 1, 1] = duv_dist_dxr_yr[:, :, 1, 1] + (xr_yr[:, :, 1] * temp2)
+        # Compute 2x2 inverse manually here since torch.inverse() is very slow.
+        # Because this is slow: inv = duv_dist_dxr_yr.inverse()
+        # About a 10x reduction in speed with above line.
+        mat = duv_dist_dxr_yr.reshape(-1, 2, 2)
+        a = mat[:, 0, 0].reshape(-1, 1, 1)
+        b = mat[:, 0, 1].reshape(-1, 1, 1)
+        c = mat[:, 1, 0].reshape(-1, 1, 1)
+        d = mat[:, 1, 1].reshape(-1, 1, 1)
+        det = 1.0 / ((a * d) - (b * c))
+        top = torch.cat([d, -b], dim=2)
+        bot = torch.cat([-c, a], dim=2)
+        inv = det * torch.cat([top, bot], dim=1)
+        inv = inv.reshape(B, N, 2, 2)
+        # Manually compute 2x2 @ 2x1 matrix multiply.
+        # Because this is slow: step = (inv @ (uv_dist - uv_dist_est)[..., None])[..., 0]
+        diff = uv_dist - uv_dist_est
+        a = inv[:, :, 0, 0]
+        b = inv[:, :, 0, 1]
+        c = inv[:, :, 1, 0]
+        d = inv[:, :, 1, 1]
+        e = diff[:, :, 0]
+        f = diff[:, :, 1]
+        step = torch.stack([a * e + b * f, c * e + d * f], dim=-1)
+        # Newton step.
+        xr_yr = xr_yr + step
+
+    # Compute theta using Newton's method.
+    xr_yr_norm = xr_yr.norm(p=2, dim=2).reshape(B, N, 1)
+    th = xr_yr_norm.clone()
+    for _ in range(max_iters):
+        th_radial = uv.new_ones(B, N, 1)
+        dthd_th = uv.new_ones(B, N, 1)
+        for k in range(6):
+            r_k = params[:, -12 + k].reshape(B, 1, 1)
+            th_radial = th_radial + (r_k * torch.pow(th, 2 + k * 2))
+            dthd_th = dthd_th + ((3.0 + 2.0 * k) * r_k * torch.pow(th, 2 + k * 2))
+        th_radial = th_radial * th
+        step = (xr_yr_norm - th_radial) / dthd_th
+        # handle dthd_th close to 0.
+        step = torch.where(dthd_th.abs() > eps, step, torch.sign(step) * eps * 10.0)
+        th = th + step
+    # Compute the ray direction using theta and xr_yr.
+    close_to_zero = torch.logical_and(th.abs() < eps, xr_yr_norm.abs() < eps)
+    ray_dir = torch.where(close_to_zero, xr_yr, torch.tan(th) / xr_yr_norm * xr_yr)
+    ray = torch.cat([ray_dir, uv.new_ones(B, N, 1)], dim=2)
+    return ray
+
+
+# unproject 2D point to 3D with fisheye624 model
+def fisheye624_unproject(coords: torch.Tensor, distortion_params: torch.Tensor) -> torch.Tensor:
+    dirs = fisheye624_unproject_helper(coords.unsqueeze(0), distortion_params[0].unsqueeze(0))
+    # correct for camera space differences:
+    dirs[..., 1] = -dirs[..., 1]
+    dirs[..., 2] = -dirs[..., 2]
+    return dirs

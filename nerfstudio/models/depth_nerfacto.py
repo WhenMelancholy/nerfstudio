@@ -21,8 +21,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Tuple, Type
 
-import torch
 import numpy as np
+import torch
 
 from nerfstudio.cameras.rays import RayBundle
 from nerfstudio.model_components import losses
@@ -49,7 +49,8 @@ class DepthNerfactoModelConfig(NerfactoModelConfig):
     sigma_decay_rate: float = 0.99985
     """Rate of exponential decay."""
     depth_loss_type: DepthLossType = DepthLossType.DS_NERF
-    """Depth loss type."""
+    """Depth loss type. Note that `PairPixelSampler` has to be used for `DepthLossType.SPARSENERF_RANKING`
+    to work as expected."""
 
 
 class DepthNerfactoModel(NerfactoModel):
@@ -95,7 +96,7 @@ class DepthNerfactoModel(NerfactoModel):
                         weights=outputs["weights_list"][i],
                         ray_samples=outputs["ray_samples_list"][i],
                         termination_depth=termination_depth,
-                        predicted_depth=outputs["depth"],
+                        predicted_depth=outputs["expected_depth"],
                         sigma=sigma,
                         directions_norm=outputs["directions_norm"],
                         is_euclidean=self.config.is_euclidean_depth,

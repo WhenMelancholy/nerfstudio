@@ -158,7 +158,7 @@ def equirect2persp(img: torch.Tensor, fov: int, theta: int, phi: int, hd: int, w
     return remap_cubic(img, lon, lat, border_mode="wrap")
 
 
-def _crop_bottom(bound_arr: list, fov: int, crop_factor: float) -> List[float]:
+def _crop_top(bound_arr: list, fov: int, crop_factor: float) -> List[float]:
     """Returns a list of vertical bounds with the bottom cropped.
 
     Args:
@@ -184,7 +184,7 @@ def _crop_bottom(bound_arr: list, fov: int, crop_factor: float) -> List[float]:
     return bound_arr
 
 
-def _crop_top(bound_arr: list, fov: int, crop_factor: float) -> List[float]:
+def _crop_bottom(bound_arr: list, fov: int, crop_factor: float) -> List[float]:
     """Returns a list of vertical bounds with the top cropped.
 
     Args:
@@ -304,7 +304,7 @@ def generate_planar_projections_from_equirectangular(
 
     with progress:
         for i in progress.track(os.listdir(frame_dir), description="", total=num_ims):
-            if i.lower().endswith((".jpg", ".png", ".jpeg")):
+            if i.lower().endswith((".jpg", ".png", ".jpeg", ".tiff", ".tif")):
                 im = np.array(cv2.imread(os.path.join(frame_dir, i)))
                 im = torch.tensor(im, dtype=torch.float32, device=device)
                 im = torch.permute(im, (2, 0, 1)).unsqueeze(0) / 255.0
@@ -331,7 +331,7 @@ def compute_resolution_from_equirect(image_dir: Path, num_images: int) -> Tuple[
     """
 
     for i in os.listdir(image_dir):
-        if i.lower().endswith((".jpg", ".png", ".jpeg")):
+        if i.lower().endswith((".jpg", ".png", ".jpeg", ".tiff", ".tif")):
             im = np.array(cv2.imread(os.path.join(image_dir, i)))
             res_squared = (im.shape[0] * im.shape[1]) / num_images
             return (int(np.sqrt(res_squared)), int(np.sqrt(res_squared)))
